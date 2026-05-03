@@ -66,7 +66,7 @@ class ProgressTracker:
     def update(self):
         self.completed_tasks += 1
         elapsed = time.time() - self.start_time
-        avg_time = elapsed / self.completed_tasks
+        avg_time = elapsed / self.completed_tasks if self.completed_tasks > 0 else 0
         remaining = avg_time * (self.total_tasks - self.completed_tasks)
         
         percent = (self.completed_tasks / self.total_tasks) * 100
@@ -140,7 +140,7 @@ def main():
 
         access_token = load_credentials()
         if not access_token:
-            print("[!] Error: Dhan access_token not found in backtest/keys.toml")
+            print("[!] Error: Dhan access_token not found in keys.toml")
             sys.exit(1)
 
         client = DhanClient(access_token)
@@ -163,8 +163,11 @@ def main():
             try:
                 start_str = input("  From Date: ")
                 end_str   = input("  To Date:   ")
-                start_date = datetime.strptime(start_str, "%d/%m/%Y")
-                end_date   = datetime.strptime(end_str, "%d/%m/%Y")
+                start_date = datetime.strptime(start_str.strip(), "%d/%m/%Y")
+                end_date   = datetime.strptime(end_str.strip(), "%d/%m/%Y")
+                if end_date < start_date:
+                    print("    [!] Error: End date must be after start date.")
+                    continue
                 break
             except ValueError:
                 print("    [!] Error: Use DD/MM/YYYY.")
@@ -176,53 +179,63 @@ def main():
         }
         info = index_meta[selected_index]
 
-        # 2. Fetch
+        # 2. Chunk Dates (Max 15 days per Dhan API)
+        date_chunks = []
+        curr = start_date
+        while curr <= end_date:
+            chunk_end = curr + timedelta(days=14)
+            if chunk_end > end_date: chunk_end = end_date
+            date_chunks.append((curr, chunk_end))
+            curr = chunk_end + timedelta(days=1)
+
+        # 3. Fetch
         strikes_labels = ["ATM"] + [f"ATM+{i}" for i in range(1, 6)] + [f"ATM-{i}" for i in range(1, 6)]
         types = ["CALL", "PUT"]
-        total_tasks = len(strikes_labels) * len(types)
+        total_tasks = len(strikes_labels) * len(types) * len(date_chunks)
         
         tracker = ProgressTracker(total_tasks)
         all_rows = []
 
         print(f"\n[4] Downloading {selected_index} Options Data...")
         
-        for slabel in strikes_labels:
-            for otype in types:
-                payload = {
-                    "exchangeSegment": info['segment'],
-                    "interval": selected_interval,
-                    "securityId": info['id'],
-                    "instrument": "OPTIDX",
-                    "expiryFlag": "WEEK", "expiryCode": 1,
-                    "strike": slabel, "drvOptionType": otype,
-                    "requiredData": ["open", "high", "low", "close", "volume", "strike", "spot"],
-                    "fromDate": start_date.strftime("%Y-%m-%d"),
-                    "toDate": end_date.strftime("%Y-%m-%d")
-                }
-                
-                resp = client.get_rolling_options(payload)
-                if resp and "data" in resp:
-                    key = 'ce' if otype == 'CALL' else 'pe'
-                    opt_data = resp['data'].get(key, {})
-                    if opt_data and "timestamp" in opt_data:
-                        df_chunk = pd.DataFrame({
-                            "timestamp": pd.to_datetime(opt_data["timestamp"], unit='s'),
-                            "open": opt_data.get("open", []),
-                            "high": opt_data.get("high", []),
-                            "low": opt_data.get("low", []),
-                            "close": opt_data.get("close", []),
-                            "volume": opt_data.get("volume", []),
-                            "strike_price": opt_data.get("strike", []),
-                            "spot_price": opt_data.get("spot", [])
-                        })
-                        df_chunk['index'] = selected_index
-                        df_chunk['option_type'] = "CE" if otype == "CALL" else "PE"
-                        df_chunk['strike_label'] = slabel
-                        all_rows.append(df_chunk)
-                
-                tracker.update()
+        for chunk_start, chunk_end in date_chunks:
+            for slabel in strikes_labels:
+                for otype in types:
+                    payload = {
+                        "exchangeSegment": info['segment'],
+                        "interval": selected_interval,
+                        "securityId": info['id'],
+                        "instrument": "OPTIDX",
+                        "expiryFlag": "WEEK", "expiryCode": 1,
+                        "strike": slabel, "drvOptionType": otype,
+                        "requiredData": ["open", "high", "low", "close", "volume", "strike", "spot"],
+                        "fromDate": chunk_start.strftime("%Y-%m-%d"),
+                        "toDate": chunk_end.strftime("%Y-%m-%d")
+                    }
+                    
+                    resp = client.get_rolling_options(payload)
+                    if resp and "data" in resp:
+                        key = 'ce' if otype == 'CALL' else 'pe'
+                        opt_data = resp['data'].get(key, {})
+                        if opt_data and "timestamp" in opt_data:
+                            df_chunk = pd.DataFrame({
+                                "timestamp": pd.to_datetime(opt_data["timestamp"], unit='s'),
+                                "open": opt_data.get("open", []),
+                                "high": opt_data.get("high", []),
+                                "low": opt_data.get("low", []),
+                                "close": opt_data.get("close", []),
+                                "volume": opt_data.get("volume", []),
+                                "strike_price": opt_data.get("strike", []),
+                                "spot_price": opt_data.get("spot", [])
+                            })
+                            df_chunk['index'] = selected_index
+                            df_chunk['option_type'] = "CE" if otype == "CALL" else "PE"
+                            df_chunk['strike_label'] = slabel
+                            all_rows.append(df_chunk)
+                    
+                    tracker.update()
 
-        # 3. Process
+        # 4. Process
         if all_rows:
             final_df = pd.concat(all_rows, ignore_index=True)
             final_df = final_df.drop_duplicates(subset=['timestamp', 'option_type', 'strike_label'])
@@ -232,24 +245,20 @@ def main():
             downloaded_dates = set(final_df['timestamp'].dt.date)
             all_requested_dates = set((start_date + timedelta(days=x)).date() for x in range((end_date - start_date).days + 1))
             
-            # Logic for Holidays: Identify weekend/requested days with NO data
-            holidays = []
-            for d in all_requested_dates:
-                if d not in downloaded_dates:
-                    # Ignore weekends if desired, but Dhan API not returning data is the best signal
-                    holidays.append(d)
+            holidays = [d for d in all_requested_dates if d not in downloaded_dates]
             
             # Storage
             print(f"\n\n[5] Saving Data...")
             for day, day_df in final_df.groupby(final_df['timestamp'].dt.date):
                 year, month, date_str = day.strftime("%Y"), day.strftime("%m"), day.strftime("%Y-%m-%d")
-                folder_path = os.path.join("backtest/data", info['dir'], f"{selected_interval}min", year, month)
+                folder_path = os.path.join("data", info['dir'], f"{selected_interval}min", year, month)
                 os.makedirs(folder_path, exist_ok=True)
                 day_df.to_csv(os.path.join(folder_path, f"{date_str}.csv"), index=False)
             
             # Update Holiday Log
             if holidays:
-                h_log_path = os.path.join("backtest/data", "holidays.json")
+                h_log_path = os.path.join("data", "holidays.json")
+                os.makedirs("data", exist_ok=True)
                 h_data = {}
                 if os.path.exists(h_log_path):
                     with open(h_log_path, "r") as f: h_data = json.load(f)
@@ -287,7 +296,7 @@ def main():
             print("  DOWNLOAD COMPLETE")
             print("═"*40)
         else:
-            print("\n\n[!] No data downloaded. These dates may be trading holidays.")
+            print("\n\n[!] No data downloaded. These dates may be trading holidays or outside the 15-day API limit per request.")
 
     except KeyboardInterrupt:
         print("\n\n[!] Aborted.")

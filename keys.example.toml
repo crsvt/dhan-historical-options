@@ -1,0 +1,6 @@
+# backtest/keys.toml — Dhan API Credentials
+# Copy this file to keys.toml and fill in your values.
+
+[broker.dhan]
+client_id = "your_client_id"
+access_token = "your_access_token"

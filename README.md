@@ -1,6 +1,22 @@
-# Dhan Options Data Fetcher
+# Dhan Data Tools
 
-A robust, standalone utility for downloading historical options premiums from the DhanHQ API, specifically tailored for strategy backtesting.
+This repository contains robust tools for fetching historical data from the DhanHQ API, optimized for algorithmic trading backtesting.
+
+## 1. Dhan Data Downloader (`dhan_data_downloader.py`)
+The **Primary All-in-One Downloader**. It is designed to download both index spot data and options premium data in a single automated flow.
+
+### Key Features:
+- **Combined Download**: Downloads **Spot Index OHLC** and **Options Premiums** (with OI) sequentially in one run.
+- **Accurate Index Tracking**: Uses the `IDX_I` segment to ensure 100% accurate spot prices for Nifty 50, Sensex, and Bank Nifty.
+- **Auto-Resume**: Scans your `data/` folder and automatically skips already-downloaded dates.
+- **Expiry Selection**: Support for Weekly, Monthly, or Both (Separate folders).
+- **Quality Reports**: Generates integrity reports for both Spot and Options data (Missing candles, OI coverage, Intraday gaps).
+- **Holiday & Weekend Logic**: Automatically skips Saturdays/Sundays and identifies trading holidays.
+
+## 2. Dhan Data Fetcher (`dhan_data_fetcher.py`)
+The **Legacy/Simple Fetcher**. This is the original, minimal version of the script. It focuses only on downloading options data for a specified range without the auto-resume, spot data, or advanced folder management features.
+
+---
 
 ## Setup
 
@@ -9,84 +25,46 @@ A robust, standalone utility for downloading historical options premiums from th
    cp keys.example.toml keys.toml
    ```
    Fill in your `client_id` and `access_token`.
-2. **Dependencies**: Ensure you have the required Python libraries.
+2. **Dependencies**: 
    ```bash
    pip install requests pandas tomli
    ```
 
-## Usage
+## Usage (Dhan Data Downloader)
 
-Run the fetcher interactively:
 ```bash
-python3 dhan_data_fetcher.py
+python3 dhan_data_downloader.py
 ```
 
-### Input Requirements
-- **Index**: Select Nifty 50, Sensex, or Bank Nifty.
-- **Interval**: 1m, 5m, 15m, 25m, or 60m.
-- **Date Format**: Enter dates in `DD/MM/YYYY` format (e.g., `30/04/2026`).
+### User Input Flow:
+1. **[1] Index**: Select Nifty 50, Sensex, or Bank Nifty.
+2. **[2] Interval**: 1m, 5m, 15m, 25m, or 60m.
+3. **[3] Expiry Type**: Select Weekly, Monthly, or Both.
+4. **[4] Date Range**: Enter start and end dates in `DD/MM/YYYY`.
+5. **[5] Automated Execution**: The script will then sequentially fetch Spot data and Options data.
 
 ## Data Storage Structure
 
-Data is organized into individual daily CSV files to ensure high performance and easy debugging.
-
-**Folder Tree Example:**
 ```text
-.
-├── dhan_data_fetcher.py
-├── keys.toml
-├── keys.example.toml
-├── .gitignore
-└── data/
-    ├── holidays.json        # Auto-generated list of non-trading dates
-    ├── NIFTY/
-    │   └── 1min/
-    │       └── 2026/
-    │           └── 04/
-    │               ├── 2026-04-28.csv
-    │               ├── 2026-04-29.csv
-    │               └── 2026-04-30.csv
-    ├── SENSEX/
-    │   └── ...
-    └── BANKNIFTY/
-        └── ...
+data/
+├── holidays.json        # Log of non-trading dates and gaps
+├── NIFTY/
+│   ├── spot/            # Index Spot Data (Nifty 50)
+│   │   └── 1min/
+│   └── 1min/
+│       ├── weekly/      # Weekly Options
+│       └── monthly/     # Monthly Options
+├── SENSEX/
+│   └── ...
+└── BANKNIFTY/
+    └── ...
 ```
 
-### CSV Schema
-- `timestamp`: IST candle time (YYYY-MM-DD HH:MM:SS).
-- `open`, `high`, `low`, `close`: Option premium prices.
-- `volume`: Trading volume.
-- `strike_price`: The actual strike price (e.g., 24050.0).
-- `spot_price`: Underlying index price at that candle.
-- `index`, `option_type`, `strike_label`: Metadata for filtering and strategy logic.
-
-## Verification & Quality Reports
-
-### Manual Verification Checkpoint
-At the end of each download, the script prints a snapshot of the last candle. You should cross-check these values against your terminal or TradingView charts to ensure data accuracy:
-```text
-[MANUAL VERIFICATION - LAST CANDLE]
-Timestamp : 2026-04-30 15:15:00
-Spot Price : 24043.70
-ATM Strike : 24050
-ATM CALL   : 24050CE  Close: 194.70
-ATM PUT    : 24050PE  Close: 163.75
-```
-
-### Data Quality Report
-The script runs a post-download integrity check covering:
-- **Trading Days**: Total days processed.
-- **Missing Candles (%)**: Percentage of candles missing relative to expected market hours (9:15 to 15:30).
-- **Duplicates**: Identification of overlapping data points.
-- **Null/Zero Prices**: Flags missing or invalid price data.
-- **Intraday Gaps**: Detects non-sequential timestamps *within* a trading day.
-
-### Holiday Tracking (`holidays.json`)
-To prevent "hallucination" during backtesting, the script automatically identifies dates that were requested but returned **no data** from the Dhan API.
-- These dates are logged in `data/holidays.json`.
-- When your backtest loader iterates through a range, it should check this file to distinguish between missing downloads and actual trading holidays.
+### CSV Schema Highlights
+- **Options**: `timestamp, open, high, low, close, volume, open_interest, strike_price, spot_price, index, option_type, strike_label`
+- **Spot**: `timestamp, open, high, low, close, volume`
 
 ## Dhan API Limitations & Notes
-- **Rate Limiting**: Strictly enforced at 1 request per 3 seconds (3.1s throttle).
-- **Holiday Gaps**: If the API returns no data for a requested date, it is marked in `holidays.json` and no CSV is created.
-- **Data Retention**: Rolling options data for expired contracts is subject to Dhan's data retention policies.
+- **Rate Limiting**: Throttled at 3.1s per request to stay within Dhan's data API limits.
+- **Data Chunking**: Options are fetched in 15-day chunks; Spot is fetched in 90-day chunks for efficiency.
+- **Weekends**: Saturdays and Sundays are automatically excluded from the fetch queue.
